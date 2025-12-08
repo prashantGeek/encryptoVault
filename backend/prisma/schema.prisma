@@ -19,13 +19,14 @@ model User {
 
 model File {
   id Int @id @default(autoincrement())
-  user User @relation(fields: [userId], references: [id])
   userId Int
-  key String
+  user User @relation(fields: [userId], references: [id])
+  key String @unique
   fileName String
   filepath String
   fileSize Int
   mimeType String
+  status String @default("pending")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

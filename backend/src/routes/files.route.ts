@@ -12,9 +12,12 @@ router.get("/", authMiddleware, async (req: AuthRequest, res:Response) =>{
         }
         
         const files = await prisma.file.findMany({
-            where: {userId: req.user.userId},
-            orderBy: { createdAt: 'desc'},
-            select:{
+            where: {
+                userId: req.user.userId,
+                status: "completed"  // Only show completed uploads
+            },
+            orderBy: { createdAt: 'desc' },
+            select: {
                 id: true,
                 fileName: true,
                 filepath: true,
@@ -22,7 +25,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res:Response) =>{
                 fileSize: true,
                 createdAt: true,
             }
-        })
+        });
         return res.status(200).json({message: "Files fetched successfully", files});
 
     }catch(error){
@@ -30,50 +33,15 @@ router.get("/", authMiddleware, async (req: AuthRequest, res:Response) =>{
     }
 })
 
-// router.post("/mock-upload", authMiddleware, async (req: AuthRequest, res: Response) =>{
-//     try{
-//         if(!req.user){
-//             return  res.status(401).json({message: "Unauthorized"});
-//         }
-//         const {fileName, mimeType, fileSize} = req.body;
-//         if(!fileName || !mimeType || !fileSize){
-//             return res.status(400).json({message: "fileName, mimeType and fileSize are required"});
-//         }
 
-//         const fakeKey = `user_${req.user.userId}/${Date.now()}_${fileName}`;
-
-//         const file = await prisma.file.create({
-//             data: {
-//                 userId: req.user.userId,
-//                 fileName,
-//                 key: fakeKey,
-//                 fileSize,
-//                 mimeType,
-//                 filepath: `https://mockstorage.example.com/${fakeKey}`,
-//             },
-//             select: {
-//                 id: true,
-//                 fileName: true,
-//                 filepath: true,
-//                 mimeType: true,
-//                 fileSize: true,
-//                 createdAt: true,
-//             }
-//         })
-//         return res.status(201).json({message: "Mock File uploaded successfully", file});
-//     }catch(error){
-//         return res.status(500).json({message: "Internal server error"});
-//     }
-// })
-
-router.post("/upload-url", authMiddleware, async (req: AuthRequest, res: Response) =>{
+router.post("/upload", authMiddleware, async (req: AuthRequest, res: Response) =>{
     try{
         if(!req.user){
             return res.status(401).json({message: "Unauthorized"});
         }
-        const {fileName, filetype, fileSize} = req.body;
-        if(!fileName || !filetype || !fileSize){
-            return res.status(400).json({message: "fileName, filetype and fileSize are required"});
+        const {fileName, mimeType, fileSize} = req.body;
+        if(!fileName || !mimeType || !fileSize){
+            return res.status(400).json({message: "fileName, mimeType and fileSize are required"});
         }
 
         const MAX_SIZE = 50 * 1024 * 1024;
@@ -86,15 +54,31 @@ router.post("/upload-url", authMiddleware, async (req: AuthRequest, res: Respons
     const timestamp = Date.now();
     const safeName = fileName.replace(/\s+/g, "_");
     const key = `user-${req.user.userId}/${timestamp}-${safeName}`;
+    const filepath = `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 
-    const uploadUrl = await getSignedUploadUrl(key, filetype, 300);
+    //create a pending file record in the database
+    const file = await prisma.file.create({
+        data: {
+            userId: req.user.userId,
+            key,
+            fileName,
+            mimeType,
+            fileSize,
+            filepath,
+            status: "pending"
+        }
+    });
 
-        return res.status(200).json({message: "Upload URL generated successfully", uploadUrl, key});
+    const uploadUrl = await getSignedUploadUrl(key, mimeType, 300);
+
+        return res.status(200).json({message: "Upload URL generated successfully", fileId:file.id, uploadUrl, key});
 
     }catch(error){
         return res.status(500).json({message: "Internal server error"});
     }
 })
+
+
 
 router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) =>{
     try{
@@ -115,6 +99,8 @@ router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) =>
             return res.status(404).json({message: "File not found"});
         }
 
+        await deleteFileFromS3(existingFile.key);
+
         await prisma.file.delete({
             where: {id: fileId}
         });
@@ -126,5 +112,73 @@ router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) =>
     }
 })
 
+router.post("/confirm-upload", authMiddleware, async (req: AuthRequest, res: Response) =>{
+    try{
+        if(!req.user){
+            return res.status(401).json({message: "Unauthorized"});
+        }
+        
+        const {fileName, key, mimeType, fileSize} = req.body;
+        if(!fileName || !key || !mimeType || !fileSize){
+            return res.status(400).json({message: "fileName, key, mimeType and fileSize are required"});
+        }
+
+        // Validate that the key starts with the user's folder prefix
+        const expectedPrefix = `user-${req.user.userId}/`;
+        if (!key.startsWith(expectedPrefix)) {
+            return res.status(400).json({ message: "Invalid file key" });
+        }
+        const file = await prisma.file.create({
+            data: {
+                userId: req.user.userId,
+                fileName,
+                key,
+                mimeType,
+                fileSize,
+                filepath: `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`,
+            },
+            select: {
+                id: true,
+                fileName: true,
+                filepath: true,
+                mimeType: true,
+                fileSize: true,
+                createdAt: true,
+            }
+        })
+        return res.status(201).json({message: "File uploaded successfully", file});
+    }catch(error){
+        return res.status(500).json({message: "Internal server error"});
+    }
+})
+
+router.get("/download-url/:id", authMiddleware, async (req: AuthRequest, res: Response) =>{
+    try{
+        if(!req.user){
+            return res.status(401).json({message: "Unauthorized"});
+        }
+
+        const fileId = Number(req.params.id);
+        if (isNaN(fileId)){
+            return res.status(400).json({ message: "Invalid file ID" });
+        }
+
+        const existingFile = await prisma.file.findUnique({
+            where: {id: fileId}
+        });
+
+        if(!existingFile || existingFile.userId !== req.user.userId){
+            return res.status(404).json({message: "File not found"});
+        }
+
+        const downloadUrl = await getsignedDownloadUrl(existingFile.key, 300);
+
+        return res.status(200).json({message: "Download URL generated successfully", downloadUrl});
+
+    }catch(error){
+        return res.status(500).json({message: "Internal server error"});
+    }
+
+})
 
 export default router;
