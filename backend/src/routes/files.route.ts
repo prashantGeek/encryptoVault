@@ -68,7 +68,7 @@ router.post("/upload", authMiddleware, async (req: AuthRequest, res: Response) =
             status: "pending"
         }
     });
-
+    //get signed upload url from s3
     const uploadUrl = await getSignedUploadUrl(key, mimeType, 300);
 
         return res.status(200).json({message: "Upload URL generated successfully", fileId:file.id, uploadUrl, key});
@@ -78,107 +78,162 @@ router.post("/upload", authMiddleware, async (req: AuthRequest, res: Response) =
     }
 })
 
+// Post /files/webhook - called by Lambda when s3 upload is complete
 
-
-router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) =>{
+router.post("/webhook", async (req: Request, res: Response) =>{
     try{
-        if(!req.user){
-            return res.status(401).json({message: "Unauthorized"});
+        console.log("=== WEBHOOK RECEIVED ===");
+        console.log("Body:", req.body);
+        
+        const secret = req.headers['x-webhook-secret'];
+        if(secret !== process.env.S3_WEBHOOK_SECRET){
+            console.error("Invalid secret");
+            return res.status(403).json({message: "Forbidden"});
         }
 
-        const fileId = Number(req.params.id);
-        if (isNaN(fileId)){
-            return res.status(400).json({ message: "Invalid file ID" });
-        }
-
-        const existingFile = await prisma.file.findUnique({
-            where: {id: fileId}
-        });
-
-        if(!existingFile || existingFile.userId !== req.user.userId){
-            return res.status(404).json({message: "File not found"});
-        }
-
-        await deleteFileFromS3(existingFile.key);
-
-        await prisma.file.delete({
-            where: {id: fileId}
-        });
-
-        return res.status(200).json({message: "File deleted successfully"});
-
-    }catch(error){
-        return res.status(500).json({message: "Internal server error"});
-    }
-})
-
-router.post("/confirm-upload", authMiddleware, async (req: AuthRequest, res: Response) =>{
-    try{
-        if(!req.user){
-            return res.status(401).json({message: "Unauthorized"});
+        const {key, size} = req.body;  // Extract size from body
+        if(!key){
+            return res.status(400).json({message: "key is required"});
         }
         
-        const {fileName, key, mimeType, fileSize} = req.body;
-        if(!fileName || !key || !mimeType || !fileSize){
-            return res.status(400).json({message: "fileName, key, mimeType and fileSize are required"});
+        console.log("Looking for file with key:", key);
+        
+        //find pending file by key and update status to completed
+        const file = await prisma.file.findUnique({
+            where: {key}
+        });
+
+        console.log("File found:", file);
+
+        if(!file){
+            console.error("File not found for key:", key);
+            return res.status(404).json({message: "File not found"});
         }
 
-        // Validate that the key starts with the user's folder prefix
-        const expectedPrefix = `user-${req.user.userId}/`;
-        if (!key.startsWith(expectedPrefix)) {
-            return res.status(400).json({ message: "Invalid file key" });
+        if(file.status === "completed"){
+            return res.status(200).json({message: "File already marked as completed"});
         }
-        const file = await prisma.file.create({
+
+        await prisma.file.update({
+            where: {id: file.id},
             data: {
-                userId: req.user.userId,
-                fileName,
-                key,
-                mimeType,
-                fileSize,
-                filepath: `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`,
-            },
-            select: {
-                id: true,
-                fileName: true,
-                filepath: true,
-                mimeType: true,
-                fileSize: true,
-                createdAt: true,
+                status: "completed",
+                fileSize: size || file.fileSize  // Fixed: moved inside data object
             }
-        })
-        return res.status(201).json({message: "File uploaded successfully", file});
+        });
+        
+        console.log("File marked complete:", key);
+        return res.status(200).json({message: "File upload confirmed successfully"});
+        
     }catch(error){
+        console.error("=== WEBHOOK ERROR ===", error);
         return res.status(500).json({message: "Internal server error"});
     }
+
 })
 
-router.get("/download-url/:id", authMiddleware, async (req: AuthRequest, res: Response) =>{
-    try{
-        if(!req.user){
-            return res.status(401).json({message: "Unauthorized"});
+router.get("/:id/download-url", authMiddleware, async (req: AuthRequest, res: Response) => {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ message: "Unauthorized" });
         }
 
         const fileId = Number(req.params.id);
-        if (isNaN(fileId)){
+        if (isNaN(fileId)) {
+            return res.status(400).json({ message: "Invalid file ID" });
+        }
+
+        const file = await prisma.file.findUnique({
+            where: { id: fileId }
+        });
+
+        if (!file || file.userId !== req.user.userId) {
+            return res.status(404).json({ message: "File not found" });
+        }
+
+        if (file.status !== "completed") {
+            return res.status(400).json({ message: "File upload not completed yet" });
+        }
+
+        const downloadUrl = await getsignedDownloadUrl(file.key, 300);
+        return res.status(200).json({ message: "Download URL generated", downloadUrl });
+
+    } catch (error) {
+        console.error("Error in GET download-url:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+});
+
+router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const fileId = Number(req.params.id);
+        if (isNaN(fileId)) {
             return res.status(400).json({ message: "Invalid file ID" });
         }
 
         const existingFile = await prisma.file.findUnique({
-            where: {id: fileId}
+            where: { id: fileId }
         });
 
-        if(!existingFile || existingFile.userId !== req.user.userId){
-            return res.status(404).json({message: "File not found"});
+        if (!existingFile || existingFile.userId !== req.user.userId) {
+            return res.status(404).json({ message: "File not found" });
         }
 
-        const downloadUrl = await getsignedDownloadUrl(existingFile.key, 300);
+        // 1. Delete from S3
+        await deleteFileFromS3(existingFile.key);
 
-        return res.status(200).json({message: "Download URL generated successfully", downloadUrl});
+        // 2. Delete from database
+        await prisma.file.delete({
+            where: { id: fileId }
+        });
 
-    }catch(error){
-        return res.status(500).json({message: "Internal server error"});
+        return res.status(200).json({ message: "File deleted successfully" });
+
+    } catch (error) {
+        console.error("Error in DELETE /files:", error);
+        return res.status(500).json({ message: "Internal server error" });
     }
+});
 
-})
+// DELETE Remove expired pending uploads (orphaned records)
+router.delete("/cleanup/pending", authMiddleware, async (req: AuthRequest, res: Response) => {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+        const expiredFiles = await prisma.file.findMany({
+            where: {
+                userId: req.user.userId,
+                status: "pending",
+                createdAt: { lt: oneHourAgo }
+            }
+        });
+
+        for (const file of expiredFiles) {
+            try {
+                await deleteFileFromS3(file.key);
+            } catch (err) {
+                console.error(`Failed to delete ${file.key} from S3`);
+            }
+            await prisma.file.delete({ where: { id: file.id } });
+        }
+
+        return res.status(200).json({
+            message: `Cleaned up ${expiredFiles.length} expired pending uploads`
+        });
+
+    } catch (error) {
+        console.error("Error in cleanup:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+});
+
 
 export default router;
