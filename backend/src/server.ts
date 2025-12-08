@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth.route.js';
 import userRoutes from './routes/users.route.js';
+import fileRoutes from './routes/files.route.js';
 
 dotenv.config();
 
@@ -18,6 +19,7 @@ app.get('/', (req, res) =>{
 
 app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
+app.use('/files', fileRoutes);
 
 app.listen(PORT, () =>{
     console.log(`Server is running on port ${PORT}`);
