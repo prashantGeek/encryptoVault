@@ -10,8 +10,13 @@ import { deleteFileFromS3 } from './services/s3.service.js';
 
 dotenv.config();
 
+
 const app = express();
-app.use(cors());
+// Allow CORS from frontend (localhost:3002)
+app.use(cors({
+    origin: ["http://localhost:3002", "http://localhost:3000"],
+    credentials: true,
+}));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
