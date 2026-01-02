@@ -3,6 +3,7 @@
 import { useState, useRef, ChangeEvent, DragEvent } from 'react';
 import { fileApi, uploadToS3 } from '@/src/lib/api';
 import { toast } from 'react-hot-toast';
+import axios from 'axios';
 
 interface FileUploadProps {
   onUploadComplete: () => void;
@@ -17,7 +18,6 @@ export default function FileUpload({ onUploadComplete }: FileUploadProps) {
   const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
   const handleFileSelect = async (file: File) => {
-    // Validate file size
     if (file.size > MAX_FILE_SIZE) {
       toast.error('File is too large. Maximum size is 50MB');
       return;
@@ -42,24 +42,32 @@ export default function FileUpload({ onUploadComplete }: FileUploadProps) {
       const { uploadUrl, fileId, key } = response.data;
 
       // Step 2: Upload file directly to S3
-      setProgress(30);
+      setProgress(50);
       await uploadToS3(uploadUrl, file);
-      setProgress(70);
+      setProgress(80);
 
-      // Step 3: Poll backend to check if Lambda webhook completed
-      // The file status changes from "pending" to "completed" when Lambda processes it
-      await pollFileStatus(fileId);
+      // Step 3: Manually call webhook to mark file as completed
+      // (This simulates what Lambda would do)
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      await axios.post(`${API_URL}/files/webhook`, {
+        key: key,
+        size: file.size
+      }, {
+        headers: {
+          'x-webhook-secret': 'abc123'
+        }
+      });
       
       setProgress(100);
       toast.success(`${file.name} uploaded successfully!`);
       
-      // Notify parent component to refresh file list
+      // Wait for database to update
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Refresh file list
       onUploadComplete();
       
-      // Reset progress after a short delay
-      setTimeout(() => {
-        setProgress(0);
-      }, 1000);
+      setTimeout(() => setProgress(0), 1000);
 
     } catch (error: any) {
       console.error('Upload error:', error);
@@ -70,29 +78,6 @@ export default function FileUpload({ onUploadComplete }: FileUploadProps) {
         fileInputRef.current.value = '';
       }
     }
-  };
-
-  // Poll backend to check if file status is "completed"
-  const pollFileStatus = async (fileId: number, maxAttempts = 10): Promise<void> => {
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-      
-      try {
-        // Check if file appears in the completed files list
-        const filesResponse = await fileApi.getFiles();
-        const file = filesResponse.data.files.find((f: any) => f.id === fileId);
-        
-        if (file) {
-          // File is completed!
-          return;
-        }
-      } catch (error) {
-        console.error('Error polling file status:', error);
-      }
-    }
-    
-    // If we get here, file might still be processing
-    console.warn('File upload to S3 succeeded, but backend confirmation pending');
   };
 
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
