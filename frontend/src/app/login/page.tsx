@@ -4,7 +4,6 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/src/context/AuthContext';
 import { toast } from 'react-hot-toast';
 import Link from 'next/link';
-import { Lock, Mail } from 'lucide-react';
 
 export default function LoginPage() {
   const router = useRouter();
