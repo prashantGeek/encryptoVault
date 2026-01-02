@@ -51,7 +51,7 @@ export const userApi ={
 //file api
 export const fileApi = {
     getFiles: () => api.get('/files'),
-    generateUploadUrl: (data:{fileName:string, mimeType:string, fileSize:number}) => api.post('/files/upload-url', data),
+    generateUploadUrl: (data:{fileName:string, mimeType:string, fileSize:number}) => api.post('/files/upload', data),
     getDownloadUrl: (fileId:number) => api.get(`/files/${fileId}/download-url`),
     deleteFile: (fileId:number) => api.delete(`/files/${fileId}`),
 }
